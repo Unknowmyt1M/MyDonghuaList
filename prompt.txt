@@ -1,0 +1,1307 @@
+Hello Kya Scene
+🐉 TrackMyDonghua - Production Architecture
+
+1. Recommended Stack
+
+Frontend
+
+React + TypeScript + Tailwind + shadcn/ui
+
+Already Lovable ka current project isi direction mein hai, so existing frontend ko throw away karne ki zarurat nahi.
+
+Architecture:
+
+React UI
+   ↓
+TanStack Router
+   ↓
+TanStack Query
+   ↓
+Supabase Client
+   ↓
+Postgres / Edge Functions
+
+Backend
+
+Supabase
+
+Use:
+
+PostgreSQL → main database
+
+Supabase Auth → authentication
+
+RLS → authorization
+
+Storage → avatars/user uploads
+
+Edge Functions → server-side logic/API integrations
+
+Realtime → notifications/live updates
+
+Cron → scheduled data synchronization
+
+Supabase ka Auth directly Postgres + JWT + RLS ke saath integrate hota hai, which is a very good fit for a tracker/community platform. (Supabase)
+
+🧠 2. Most Important Decision: Data Architecture
+
+Main external API ko TrackMyDonghua ka database nahi banaunga.
+
+Instead:
+
+External Sources
+      ↓
+Data Ingestion Worker
+      ↓
+Normalization
+      ↓
+TrackMyDonghua PostgreSQL
+      ↓
+Frontend
+
+Yaani external APIs source of truth nahi, balki data providers honge.
+
+This gives us:
+
+faster pages
+
+reliable search
+
+historical data
+
+stable IDs
+
+less API dependency
+
+better recommendations
+
+release tracking
+
+user-generated metadata
+
+ability to change providers later
+
+Aur ye especially important hai because AniList explicitly API ko backup/data-storage service ki tarah use karne aur mass collection ko prohibit karta hai. (Anilist)
+
+📚 3. Donghua Data Sources
+
+Primary approach
+
+Humein licensed/permission-compatible sources choose karne chahiye.
+
+Potential sources ko adapter architecture ke through connect karenge:
+
+DataProvider
+├── ProviderA
+├── ProviderB
+├── ProviderC
+└── ManualAdminData
+
+Har provider ka output:
+
+NormalizedTitle
+NormalizedSeason
+NormalizedEpisode
+NormalizedPerson
+NormalizedGenre
+
+Then database mein merge.
+
+TMDB
+
+TMDB useful secondary metadata provider ho sakta hai.
+
+It provides TV-series details and season/episode-level information through its API. (The Movie Database (TMDB))
+
+But TMDB ko sole donghua database nahi maanunga. Coverage and metadata quality Chinese animation ke liye verify karni padegi.
+
+Also API requests ko server-side cache karna better hai; TMDB currently roughly ~40 requests/sec range mein upper limits maintain karta hai and 429 responses respect karne chahiye. (The Movie Database (TMDB))
+
+🗄️ 4. Database Design
+
+Yeh project ka actual backbone hoga.
+
+Users
+
+profiles
+---------
+id
+username
+display_name
+bio
+avatar_url
+banner_url
+location
+website
+is_private
+created_at
+updated_at
+
+id → auth.users.id
+
+🎬 Titles
+
+titles
+------
+id
+slug
+title
+original_title
+native_title
+synonyms[]
+description
+cover_url
+banner_url
+type
+status
+release_year
+start_date
+end_date
+total_episodes
+duration
+source
+source_id
+average_rating
+rating_count
+popularity_score
+favorites_count
+views_count
+created_at
+updated_at
+
+Types:
+
+TV
+ONA
+Movie
+OVA
+Special
+Short
+
+Status:
+
+Upcoming
+Airing
+Completed
+Hiatus
+Cancelled
+
+🏷️ Genres & Tags
+
+Instead of titles mein text arrays bharna:
+
+genres
+------
+id
+name
+slug
+
+title_genres
+------------
+title_id
+genre_id
+
+Similarly:
+
+tags
+title_tags
+
+This makes filtering much faster and cleaner.
+
+📺 Seasons
+
+seasons
+-------
+id
+title_id
+season_number
+name
+description
+poster_url
+release_date
+
+▶️ Episodes
+
+episodes
+--------
+id
+title_id
+season_id
+episode_number
+absolute_number
+title
+description
+thumbnail_url
+air_date
+air_time
+duration
+status
+external_id
+created_at
+updated_at
+
+Important:
+
+episode_number + title_id unique hona chahiye.
+
+👤 User Watchlist
+
+user_titles
+-----------
+id
+user_id
+title_id
+status
+score
+started_at
+completed_at
+notes
+rewatch_count
+created_at
+updated_at
+
+Status:
+
+watching
+completed
+on_hold
+dropped
+plan_to_watch
+
+Tumne initially four statuses diye the, but production system mein Dropped add karna worthwhile hai.
+
+⏱️ Episode Progress
+
+episode_progress
+----------------
+id
+user_id
+episode_id
+watched
+progress_seconds
+completed_at
+updated_at
+
+Example:
+
+Episode 18
+progress_seconds = 942
+duration = 1260
+watched = false
+
+Frontend progress:
+
+942 / 1260
+
+❤️ Favorites
+
+favorites
+---------
+user_id
+title_id
+created_at
+
+Unique:
+
+(user_id, title_id)
+
+So duplicate favorites impossible.
+
+⭐ Ratings
+
+ratings
+-------
+id
+user_id
+title_id
+score
+created_at
+updated_at
+
+Score:
+
+1-10
+
+Database constraint lagayenge.
+
+📝 Reviews
+
+reviews
+-------
+id
+user_id
+title_id
+rating
+body
+spoiler
+status
+created_at
+updated_at
+
+Status:
+
+published
+hidden
+removed
+
+👍 Review Reactions
+
+review_reactions
+----------------
+review_id
+user_id
+reaction
+
+Reaction:
+
+helpful
+not_helpful
+
+🔔 Notifications
+
+notifications
+-------------
+id
+user_id
+type
+title
+message
+data
+read_at
+created_at
+
+Types:
+
+episode_release
+watchlist_update
+review_like
+system
+recommendation
+
+🔔 Release Subscriptions
+
+User kisi title ko follow kare:
+
+release_subscriptions
+---------------------
+user_id
+title_id
+notify_new_episode
+notify_new_season
+created_at
+
+🧑‍💼 Roles
+
+user_roles
+----------
+user_id
+role
+
+Roles:
+
+user
+moderator
+editor
+admin
+
+Role ko frontend mein trust nahi karna.
+
+Database RLS + server-side checks enforce karenge.
+
+Supabase specifically recommends RLS for granular authorization, and service keys must never be exposed to the browser because they bypass RLS. (Supabase)
+
+🔐 5. Authentication Architecture
+
+Main recommend karunga:
+
+Phase 1
+
+Email + Password
+
+Phase 2
+
+Google OAuth
+
+Phase 3
+
+Magic Link
+
+Phase 4
+
+MFA
+
+Supabase supports password, magic link/OTP, social login and MFA. (Supabase)
+
+Auth Flow
+
+User
+ ↓
+Sign Up
+ ↓
+Supabase Auth
+ ↓
+Email verification
+ ↓
+auth.users
+ ↓
+Profile creation
+ ↓
+Dashboard
+
+Profile creation database trigger/function se automatically ho sakti hai.
+
+🔒 6. RLS - Very Important
+
+Every user-owned table should have policies like:
+
+user_id = auth.uid()
+
+Example:
+
+user_titles
+
+User:
+
+✅ own watchlist read
+✅ own watchlist create
+✅ own watchlist update
+✅ own watchlist delete
+
+Cannot:
+
+❌ modify another user's list
+
+Supabase explicitly recommends RLS on exposed tables; without appropriate policies, client-side access can expose or modify data incorrectly. (Supabase)
+
+🛡️ 7. Security Model
+
+Architecture:
+
+Browser
+  ↓
+Publishable Supabase key
+  ↓
+RLS
+  ↓
+Postgres
+
+Sensitive operations:
+
+Browser
+ ↓
+Edge Function
+ ↓
+Secret API key
+ ↓
+External API
+
+Never:
+
+Browser → SERVICE_ROLE_KEY
+
+Supabase explicitly says service-role/secret keys must never be exposed client-side. (Supabase)
+
+⚙️ 8. Edge Functions
+
+We'll use Edge Functions for:
+
+Data sync
+
+sync-titles
+sync-episodes
+sync-releases
+
+Recommendations
+
+generate-recommendations
+
+Notifications
+
+send-release-notifications
+
+Admin
+
+admin-import-title
+admin-refresh-title
+
+External APIs
+
+provider-search
+provider-details
+
+Supabase Edge Functions are server-side TypeScript functions and are designed for exactly this type of third-party integration/server logic. (Supabase)
+
+🕐 9. Automated Release System
+
+This is where TrackMyDonghua can become genuinely useful.
+
+Every X minutes:
+
+Cron
+ ↓
+sync releases
+ ↓
+find newly aired episodes
+ ↓
+update episodes
+ ↓
+find affected users
+ ↓
+create notifications
+
+Supabase Cron can invoke Edge Functions through pg_cron + pg_net. (Supabase)
+
+Example:
+
+Every 15 minutes
+     ↓
+Check upcoming episodes
+     ↓
+New episode?
+     ↓
+YES
+ ↓
+Create notification
+ ↓
+Realtime → UI
+
+⚡ 10. Realtime Notifications
+
+For example:
+
+🔔 Renegade Immortal Episode 128 is out!
+
+Database:
+
+notifications INSERT
+
+Realtime:
+
+Postgres
+ ↓
+Realtime
+ ↓
+Browser
+ ↓
+Notification bell updates
+
+Supabase Realtime supports database change subscriptions with RLS authorization. (Supabase)
+
+For larger scale, I'd prefer Realtime Broadcast rather than subscribing every client directly to high-volume Postgres changes; Supabase currently recommends Broadcast for scalability/security. (Supabase)
+
+📊 11. Personal Statistics Engine
+
+User profile should calculate:
+
+Total Titles
+Episodes Watched
+Hours Watched
+Completed
+Watching
+On Hold
+Plan to Watch
+Dropped
+Average Score
+Favorite Genre
+Longest Streak
+
+Example:
+
+Total watched:
+47 titles
+
+Episodes:
+1,248
+
+Hours:
+392h
+
+Completed:
+18
+
+Watching:
+7
+
+Don't calculate everything in React.
+
+We'll create DB views/functions for expensive aggregates.
+
+🧠 12. Recommendation Engine
+
+Initially simple but effective.
+
+Signals
+
+genre preference
+tag preference
+watch history
+completed titles
+ratings
+favorites
+watch time
+similar titles
+popularity
+recency
+
+Scoring:
+
+recommendation_score =
+    genre_match
+  + tag_match
+  + similar_title_score
+  + popularity
+  + rating
+  + recency
+  - already_watched_penalty
+
+Later:
+
+pgvector
++
+embeddings
+
+for semantic recommendations.
+
+Supabase Postgres supports extensions including pgvector. (Supabase)
+
+🔎 13. Search System
+
+Normal SQL:
+
+title
+original_title
+native_title
+synonyms
+
+But eventually:
+
+Postgres Full Text Search
+
+And later:
+
+pgvector semantic search
+
+Search should understand:
+
+"btth"
+"Battle Through the Heavens"
+"斗破苍穹"
+"Dou Po Cang Qiong"
+
+All should potentially point to the same title.
+
+📱 14. Frontend Architecture
+
+I'd structure it roughly:
+
+src/
+├── components/
+│   ├── ui/
+│   ├── layout/
+│   ├── donghua/
+│   ├── watchlist/
+│   ├── profile/
+│   └── notifications/
+│
+├── pages/
+│   ├── Home
+│   ├── Discover
+│   ├── Title
+│   ├── Watchlist
+│   ├── Calendar
+│   ├── Profile
+│   ├── Settings
+│   └── Auth
+│
+├── hooks/
+├── lib/
+│   ├── supabase
+│   ├── api
+│   ├── auth
+│   └── utils
+│
+├── queries/
+├── mutations/
+├── types/
+└── routes/
+
+🎨 15. UX Logic
+
+Home
+
+Logged out:
+
+Hero
+↓
+Trending
+↓
+Popular
+↓
+Currently Airing
+↓
+Upcoming
+
+Logged in:
+
+Continue Watching
+↓
+Your Upcoming Episodes
+↓
+Watchlist Progress
+↓
+Recommendations
+↓
+Trending
+
+This is much better than showing the exact same homepage to everyone.
+
+📺 16. Watch Progress Logic
+
+When user clicks:
+
+Episode 23
+
+Automatically:
+
+user_titles.status = watching
+
+if title wasn't already in list.
+
+On completion:
+
+episode_progress.watched = true
+
+Then:
+
+next_episode available?
+        ↓
+YES → continue watching
+NO  → completed
+
+But user should always be able to override the status.
+
+🔄 17. Watchlist State Machine
+
+Plan to Watch
+      ↓
+Watching
+   ↙     ↘
+On Hold  Completed
+   ↓
+Watching
+
+Optional:
+
+Watching → Dropped
+
+No accidental state changes.
+
+⭐ 18. Rating Logic
+
+When user rates:
+
+1-10
+
+Database trigger/function updates:
+
+average_rating
+rating_count
+
+But I would not blindly trust client-calculated averages.
+
+Server/database owns the aggregate.
+
+📝 19. Review Moderation
+
+Production mein review system ke bina moderation risky hai.
+
+Need:
+
+report_review
+
+review_reports
+--------------
+review_id
+user_id
+reason
+status
+created_at
+
+Reasons:
+
+spam
+
+harassment
+
+spoiler
+
+hate
+
+sexual content
+
+misinformation
+
+copyright
+
+Admin dashboard:
+
+Reports
+ ↓
+Review
+ ↓
+Hide / Restore / Delete
+
+🚨 20. Anti-Abuse
+
+Need protections for:
+
+signup spam
+
+review spam
+
+rating manipulation
+
+API abuse
+
+scraping
+
+bot traffic
+
+Supabase Auth already provides configurable rate limiting for authentication endpoints and returns 429 when limits are exceeded. (Supabase)
+
+We'll additionally rate-limit:
+
+review creation
+rating creation
+search
+API calls
+admin endpoints
+
+🖼️ 21. Image Storage
+
+User avatars:
+
+Supabase Storage
+   ↓
+avatars/
+   └── user-id/
+
+Storage also uses RLS-based policies, so users can be restricted to their own uploads. (Supabase)
+
+Donghua posters/banners should ideally come from licensed/allowed sources rather than blindly copying artwork into our own storage.
+
+📈 22. Performance
+
+Important indexes:
+
+titles.slug
+titles.status
+titles.release_year
+titles.popularity_score
+
+episodes.title_id
+episodes.air_date
+
+user_titles.user_id
+user_titles.title_id
+
+favorites.user_id
+favorites.title_id
+
+ratings.title_id
+reviews.title_id
+notifications.user_id
+
+Postgres indexes significantly reduce lookup cost on large datasets, but unnecessary indexes also add write/storage overhead, so we'll index based on actual query patterns. (Supabase)
+
+🚀 23. Pagination
+
+Never:
+
+SELECT * FROM titles
+
+for the entire catalog.
+
+Use:
+
+limit
+cursor
+
+For example:
+
+20 titles
+↓
+next cursor
+↓
+20 more
+
+Especially Discover.
+
+📦 24. Caching Strategy
+
+Three layers:
+
+Browser cache
+      ↓
+TanStack Query
+      ↓
+Supabase/Postgres
+
+External API:
+
+External API
+ ↓
+Edge Function
+ ↓
+Database cache
+
+So homepage doesn't repeatedly hit external APIs.
+
+🔐 25. Auth UX
+
+Auth pages:
+
+Sign Up
+
+Username
+Email
+Password
+Confirm Password
+
+Login
+
+Email
+Password
+Remember me
+Forgot password
+Google
+
+Verification
+
+Check your email
+Resend verification
+
+Reset
+
+Email
+ ↓
+Reset email
+ ↓
+New password
+
+Supabase supports email verification and password-reset flows; for real production email delivery, a custom SMTP provider is recommended because the built-in email service has very restrictive limits. (Supabase)
+
+🛡️ 26. MFA
+
+Not mandatory for normal users initially.
+
+But:
+
+Settings
+ → Security
+ → Enable 2FA
+
+TOTP authenticator support later.
+
+Supabase supports TOTP MFA and exposes authentication assurance levels in JWTs, so higher-security roles can require stronger authentication. (Supabase)
+
+For example:
+
+admin → MFA mandatory
+user → MFA optional
+
+🧑‍💼 27. Admin Dashboard
+
+This is 100% needed before production.
+
+Admin pages:
+
+Overview
+Titles
+Episodes
+Users
+Reviews
+Reports
+Genres
+Tags
+Releases
+Data Sync
+System Logs
+
+Dashboard stats:
+
+Users
+Titles
+Episodes
+Reviews
+Active users
+New signups
+Reports
+
+🗃️ 28. Data Sync Dashboard
+
+Admin should see:
+
+Last successful sync
+Provider
+Titles updated
+Episodes updated
+Failures
+Next sync
+
+And buttons:
+
+Sync now
+Sync title
+Retry failed
+
+🧪 29. Testing Strategy
+
+Before production:
+
+Unit
+
+watchlist state transitions
+rating calculations
+recommendation score
+date parsing
+episode progress
+
+Integration
+
+signup → profile
+login → watchlist
+episode → progress
+rating → aggregate
+release → notification
+
+Security
+
+Test:
+
+User A → User B data
+User → admin endpoint
+anon → private data
+expired JWT
+invalid UUID
+
+Most important test:
+
+Can User A modify User B's watchlist?
+
+Answer must always be NO.
+
+🏗️ 30. Production Architecture
+
+Final architecture:
+
+┌──────────────────┐
+                  │   TrackMyDonghua │
+                  │      Frontend    │
+                  └────────┬─────────┘
+                           │
+                    Supabase Client
+                           │
+             ┌─────────────┴─────────────┐
+             │                           │
+          Supabase                    Edge
+             │                       Functions
+             │                           │
+        ┌────▼────┐              ┌───────▼────────┐
+        │   RLS   │              │ External APIs  │
+        └────┬────┘              └────────────────┘
+             │
+       ┌─────▼────────┐
+       │  PostgreSQL  │
+       └─────┬────────┘
+             │
+     ┌───────┼─────────┐
+     │       │         │
+   Auth   Storage   Realtime
+     │       │         │
+     └───────┴─────────┘
+             │
+          Cron Jobs
+             │
+      Release Sync /
+      Notifications /
+      Data Refresh
+
+💡 31. Production Phases
+
+Main project ko ek hi giant Lovable prompt mein blindly build nahi karunga. Better hai controlled phases.
+
+Phase 1 - Foundation
+
+Supabase database
+
+schema
+
+migrations
+
+RLS
+
+auth
+
+profiles
+
+roles
+
+Phase 2 - Catalog
+
+titles
+
+seasons
+
+episodes
+
+genres
+
+tags
+
+search
+
+filtering
+
+Phase 3 - User Tracking
+
+watchlist
+
+episode progress
+
+favorites
+
+ratings
+
+statistics
+
+Phase 4 - Community
+
+reviews
+
+reactions
+
+reports
+
+moderation
+
+Phase 5 - Release Engine
+
+provider adapters
+
+episode sync
+
+release calendar
+
+notifications
+
+cron
+
+Phase 6 - Recommendation
+
+personalization
+
+similar titles
+
+trending algorithm
+
+eventually embeddings
+
+Phase 7 - Production Hardening
+
+performance
+
+security audit
+
+error states
+
+loading states
+
+accessibility
+
+SEO
+
+analytics
+
+backups
+
+monitoring
+
+⚠️ One Big Thing I Would NOT Do
+
+Random scraping + random anime APIs ko frontend se directly call nahi karunga.
+
+That creates:
+
+API dependency
++
+rate limits
++
+CORS problems
++
+inconsistent IDs
++
+data duplication
++
+legal/licensing headaches
++
+slow UI
+
+Instead:
+
+Provider → ingestion → normalized DB → frontend.
+
+That's the difference between a demo and an actual platform.
+
+🔥 My Final Recommendation
+
+TrackMyDonghua ka production stack:
+
+Layer
+Choice
+Frontend
+React + TypeScript
+UI
+Tailwind + shadcn
+Routing
+TanStack Router
+Server state
+TanStack Query
+Database
+PostgreSQL
+Backend
+Supabase
+Auth
+Supabase Auth
+Authorization
+PostgreSQL RLS
+Server logic
+Edge Functions
+Scheduled jobs
+Supabase Cron
+Files
+Supabase Storage
+Realtime
+Supabase Realtime
+Search
+PostgreSQL FTS → pgvector later
+Recommendations
+Rule-based → ML/vector later
+External data
+Provider adapter architecture
+Admin
+Role-based admin dashboard
+Monitoring
+Error + DB + sync monitoring
+Deployment
+Lovable production hosting + Supabase
+
+And importantly…
+
+Current Lovable project mein database abhi enabled bhi nahi hai. Maine check kiya: project currently UI/mock-data stage par hai, so next step genuinely backend foundation banana hai-not just adding more pretty screens.
+
+Supabase ka production checklist bhi explicitly RLS, security review, availability and related hardening checks recommend karta hai before going live. (Supabase)
+
+So ab mere hisaab se next move “production build” nahi, balki Phase 1 foundation se start karna hai: Supabase provision → schema → RLS → Auth → profiles/roles → migrations → frontend ko real DB se connect. Uske baad baaki features safely layer karenge.
+
+Supabase Auth docs · Supabase RLS docs · Supabase production checklist.
